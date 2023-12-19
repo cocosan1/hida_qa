@@ -6,18 +6,16 @@ from google.oauth2 import service_account
 import datetime
 import os
 
-from llama_index import download_loader
-from pandasai.llm.openai import OpenAI
+from langchain.document_loaders import DataFrameLoader
 
-# pip install streamlit pandas gspread google-auth llama-index pandasai
+
+# pip install streamlit pandas gspread google-auth langchain
 
 
 st.set_page_config(page_title='HIDA Q&A', layout='wide')
 st.markdown('#### HIDA Q&A')
 
 os.environ['OPENAI_API_KEY'] = st.secrets['OPENAI_API_KEY']
-
-
 
 
 SP_SHEET = 'フォームの回答 1'
@@ -40,48 +38,57 @@ worksheet = sh.worksheet(SP_SHEET)
 data= worksheet.get_all_values()
 
 # スプレッドシートをDataFrameに取り込む
-df = pd.DataFrame(data, columns=data[0])
+df = pd.DataFrame(data[1:], columns=data[0])
 
-df2= df[['question', 'answer']]
+#datetime型に変換
+df['timestamp_temp'] = pd.to_datetime(df['タイムスタンプ'])
+
+#時刻データを削除した列の新設 str化
+df['timestamp'] = df['timestamp_temp'].map(lambda x: x.strftime('%Y-%m-%d'))
+
+# 列の絞り込み
+df2= df[['timestamp', 'question', 'answer']]
 
 st.table(df2)
 
-##### loader
 
 
-# Sample DataFrame
-df = pd.DataFrame({
-    "country": ["United States", "United Kingdom", "France", "Germany", "Italy", "Spain", "Canada", "Australia", "Japan", "China"],
-    "gdp": [21400000, 2940000, 2830000, 3870000, 2160000, 1350000, 1780000, 1320000, 516000, 14000000],
-    "happiness_index": [7.3, 7.2, 6.5, 7.0, 6.0, 6.3, 7.3, 7.3, 5.9, 5.0]
-})
+loader = DataFrameLoader(df) # page_content_column='answer'
 
-llm = OpenAI()
+docs = loader.load()
 
-PandasAIReader = download_loader("PandasAIReader")
+st.write(docs)
 
-# use run_pandas_ai directly 
-# set is_conversational_answer=False to get parsed output
-loader = PandasAIReader(llm=llm)
-response = reader.run_pandas_ai(
-    df, 
-    "Which are the 5 happiest countries?", 
-    is_conversational_answer=False
+import bs4
+from langchain import hub
+from langchain.chat_models import ChatOpenAI
+from langchain.document_loaders import WebBaseLoader
+from langchain.embeddings import OpenAIEmbeddings
+from langchain.schema import StrOutputParser
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.vectorstores import Chroma
+from langchain_core.runnables import RunnablePassthrough
+
+text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+splits = text_splitter.split_documents(docs)
+
+vectorstore = Chroma.from_documents(documents=splits, embedding=OpenAIEmbeddings())
+retriever = vectorstore.as_retriever()
+
+prompt = hub.pull("rlm/rag-prompt")
+llm = ChatOpenAI(model_name="gpt-3.5-turbo", temperature=0)
+
+
+def format_docs(docs):
+    return "\n\n".join(doc.page_content for doc in docs)
+
+
+rag_chain = (
+    {"context": retriever | format_docs, "question": RunnablePassthrough()}
+    | prompt
+    | llm
+    | StrOutputParser()
 )
-print(response)
 
-# # load data with is_conversational_answer=False
-# # will use our PandasCSVReader under the hood
-# docs = reader.load_data(
-#     df, 
-#     "Which are the 5 happiest countries?", 
-#     is_conversational_answer=False
-# )
+rag_chain.invoke("ベンチの脚のサイズは？")
 
-# # load data with is_conversational_answer=True
-# # will use our PandasCSVReader under the hood
-# docs = reader.load_data(
-#     df, 
-#     "Which are the 5 happiest countries?", 
-#     is_conversational_answer=True
-# )
